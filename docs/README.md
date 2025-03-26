@@ -50,7 +50,7 @@ netwatch_env\Scripts\activate     # Windows
 pip install -r requirements.txt
 
 # Run the application
-python app/main.py
+python app/main.py```
 
 # 🎯 Usage  
 
