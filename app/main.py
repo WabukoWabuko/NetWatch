@@ -9,6 +9,7 @@ import logging
 import subprocess
 from datetime import datetime
 from PyQt5.QtWidgets import QApplication, QMainWindow, QTableWidget, QVBoxLayout, QWidget, QTableWidgetItem, QPushButton, QHBoxLayout, QLabel, QInputDialog, QMessageBox
+from PyQt5.QtGui import QLineEdit  # Import QLineEdit for EchoMode
 from PyQt5.QtCore import QTimer
 from scapy.all import sniff, DNS, IP, TCP, UDP, Ether
 from flask import Flask, jsonify, request
@@ -148,17 +149,16 @@ class NetWatchWindow(QMainWindow):
 
     def ensure_privileges(self):
         if os.geteuid() != 0:
-            password, ok = QInputDialog.getText(self, "Admin Access Required", "Enter root password:", echo=QInputDialog.Password)
+            password, ok = QInputDialog.getText(self, "Admin Access Required", "Enter root password:", QLineEdit.Password)
             if ok and password:
                 try:
-                    # Use pkexec to elevate (adjust path if needed)
                     cmd = f"echo '{password}' | pkexec --disable-internal-agent {sys.executable} {__file__}"
                     process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     stdout, stderr = process.communicate()
                     if process.returncode == 0:
-                        sys.exit(0)  # Relaunch successful, exit current instance
+                        sys.exit(0)  # Relaunch successful
                     else:
-                        QMessageBox.critical(self, "Error", f"Failed to elevate privileges: {stderr.decode()}")
+                        QMessageBox.critical(self, "Error", f"Failed to elevate: {stderr.decode()}")
                         self.status_label.setText("Error: Must run with root privileges!")
                         self.status_label.setStyleSheet("color: red")
                 except Exception as e:
@@ -226,7 +226,6 @@ def init_db():
             port INTEGER
         )
     """)
-    # Add mac column if missing
     try:
         c.execute("ALTER TABLE activity ADD COLUMN mac TEXT")
     except sqlite3.OperationalError:
@@ -235,7 +234,7 @@ def init_db():
     conn.close()
 
 if __name__ == "__main__":
-    init_db()  # Ensure DB is ready
+    init_db()
     app = QApplication(sys.argv)
     window = NetWatchWindow()
     window.show()
