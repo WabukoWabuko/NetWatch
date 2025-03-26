@@ -59,7 +59,7 @@ def get_active_interface():
         if iface != 'lo':
             addrs = netifaces.ifaddresses(iface)
             if netifaces.AF_INET in addrs:
-                logging.info(f"Found active interface: {iface}")
+                logging.info(f"Selected interface: {iface}")
                 return iface
     logging.error("No active interface found!")
     return None
@@ -75,7 +75,7 @@ def log_to_db(device_name, ip, mac, domain=None, app=None, port=None, location=N
         )
         conn.commit()
     except sqlite3.Error as e:
-        print(f"DB Error: {e}")
+        logging.error(f"DB Error: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -84,7 +84,7 @@ def process_packet(packet):
     if not monitoring_running:
         return True
     from scapy.all import IP, Ether, DNS, TCP, UDP
-    logging.debug("Packet received!")
+    logging.debug(f"Processing packet: {packet.summary()}")
     if packet.haslayer(IP) and packet.haslayer(Ether):
         ip_src = packet[IP].src
         mac_src = packet[Ether].src
@@ -102,6 +102,8 @@ def process_packet(packet):
             domain = get_domain_from_ip(packet[IP].dst) if packet[IP].dst else None
             logging.info(f"Device {device_name} ({ip_src}, {mac_src}) used app: {app} (port {port}) to {domain or 'unknown'} at {location}")
             log_to_db(device_name, ip_src, mac_src, domain=domain, app=app, port=port, location=location)
+    else:
+        logging.debug("Packet ignored: no IP or Ether layer")
 
 def guess_app_from_port(port, packet):
     port_map = {
@@ -125,7 +127,10 @@ def guess_app_from_port(port, packet):
 def start_monitoring_thread(iface):
     from scapy.all import sniff
     logging.info(f"Starting sniff on {iface}...")
-    sniff(iface=iface, prn=process_packet, store=0, stop_filter=lambda x: not monitoring_running)
+    try:
+        sniff(iface=iface, prn=process_packet, store=0, stop_filter=lambda x: not monitoring_running)
+    except Exception as e:
+        logging.error(f"Sniffing failed: {e}")
 
 # Settings Dialog
 class SettingsDialog(QDialog):
@@ -155,7 +160,6 @@ class NetWatchWindow(QMainWindow):
         self.setWindowTitle("NetWatch")
         self.setGeometry(100, 100, 1200, 800)
         
-        # Set modern theme
         palette = QPalette()
         palette.setColor(QPalette.Window, QColor(240, 240, 240))
         palette.setColor(QPalette.WindowText, Qt.black)
@@ -239,11 +243,11 @@ class NetWatchWindow(QMainWindow):
                     if process.returncode == 0:
                         sys.exit(0)
                     else:
-                        QMessageBox.critical(self, "Error", f"Failed to elevate: {stderr.decode()}")
+                        QMessageBox.critical(self, "Error", f"Failed to elevate: {stderr.decode()}", QMessageBox.Ok)
                         self.status_label.setText("Error: Must run with root privileges!")
                         self.status_label.setStyleSheet("color: red")
                 except Exception as e:
-                    QMessageBox.critical(self, "Error", f"Elevation failed: {e}")
+                    QMessageBox.critical(self, "Error", f"Elevation failed: {e}", QMessageBox.Ok)
                     self.status_label.setText("Error: Elevation failed!")
                     self.status_label.setStyleSheet("color: red")
             else:
@@ -271,11 +275,11 @@ class NetWatchWindow(QMainWindow):
             
             self.table.setRowCount(len(rows))
             for row_idx, row_data in enumerate(rows):
-                for col_idx, data in enumerate(row_data[1:]):  # Skip id column
+                for col_idx, data in enumerate(row_data[1:]):
                     self.table.setItem(row_idx, col_idx, QTableWidgetItem(str(data or "")))
-                self.table.setData(Qt.UserRole, row_idx, row_data[0])  # Store id in UserRole
+                self.table.setData(Qt.UserRole, row_idx, row_data[0])
         except Exception as e:
-            print(f"Table update error: {e}")
+            logging.error(f"Table update error: {e}")
 
     def show_context_menu(self, pos):
         row = self.table.rowAt(pos.y())
@@ -300,9 +304,9 @@ class NetWatchWindow(QMainWindow):
                 self.status_label.setText("Row deleted")
                 self.status_label.setStyleSheet("color: green")
             except sqlite3.Error as e:
-                QMessageBox.critical(self, "Error", f"Failed to delete: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to delete: {e}", QMessageBox.Ok)
         elif ok:
-            QMessageBox.warning(self, "Error", "Incorrect password")
+            QMessageBox.warning(self, "Error", "Incorrect password", QMessageBox.Ok)
 
     def clear_all_data(self):
         password, ok = QInputDialog.getText(self, "Confirm Clear", "Enter root password to clear all data:", QLineEdit.Password)
@@ -317,9 +321,9 @@ class NetWatchWindow(QMainWindow):
                 self.status_label.setText("All data cleared")
                 self.status_label.setStyleSheet("color: green")
             except sqlite3.Error as e:
-                QMessageBox.critical(self, "Error", f"Failed to clear: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to clear: {e}", QMessageBox.Ok)
         elif ok:
-            QMessageBox.warning(self, "Error", "Incorrect password")
+            QMessageBox.warning(self, "Error", "Incorrect password", QMessageBox.Ok)
 
     def verify_root_password(self, password):
         try:
@@ -327,7 +331,7 @@ class NetWatchWindow(QMainWindow):
             process = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             return process.returncode == 0
         except Exception as e:
-            print(f"Password verification failed: {e}")
+            logging.error(f"Password verification failed: {e}")
             return False
 
     def start_monitoring(self):
@@ -338,6 +342,8 @@ class NetWatchWindow(QMainWindow):
         iface = get_active_interface()
         if not iface:
             self.status_label.setText("Error: No network interface found!")
+            self.status_label.setStyleSheet("color: red")
+            QMessageBox.critical(self, "Error", "No active network interface found!", QMessageBox.Ok)
             return
         
         monitoring_running = True
@@ -345,8 +351,9 @@ class NetWatchWindow(QMainWindow):
         self.monitor_thread.start()
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.status_label.setText("Monitoring started")
+        self.status_label.setText(f"Monitoring started on {iface}")
         self.status_label.setStyleSheet("color: green")
+        logging.info("Monitoring thread started")
 
     def stop_monitoring(self):
         global monitoring_running
@@ -357,6 +364,7 @@ class NetWatchWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.status_label.setText("Monitoring stopped")
         self.status_label.setStyleSheet("color: green")
+        logging.info("Monitoring thread stopped")
 
     def show_settings(self):
         dialog = SettingsDialog(self)
@@ -390,7 +398,7 @@ def init_db():
             pass
         conn.commit()
     except sqlite3.Error as e:
-        print(f"DB Init Error: {e}")
+        logging.error(f"DB Init Error: {e}")
     finally:
         if 'conn' in locals():
             conn.close()
