@@ -11,13 +11,16 @@ import requests
 from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTableWidget, QVBoxLayout, QWidget, 
                             QTableWidgetItem, QPushButton, QHBoxLayout, QLabel, QInputDialog, 
-                            QMessageBox, QLineEdit, QComboBox, QDialog, QFormLayout, QCheckBox)
-from PyQt5.QtCore import QTimer
+                            QMessageBox, QLineEdit, QComboBox, QDialog, QFormLayout, QCheckBox,
+                            QMenu, QHeaderView)
+from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtGui import QFont, QColor, QPalette
 
-# Setup logging with a basic handler to avoid recursion
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
+# Setup logging to file and stdout
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(message)s", 
+                    handlers=[logging.FileHandler("netwatch.log"), logging.StreamHandler(sys.stdout)])
 
-# Global DB path (computed once)
+# Global DB path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_DIR = os.path.join(BASE_DIR, "db")
 DB_PATH = os.path.join(DB_DIR, "netwatch.db")
@@ -134,6 +137,7 @@ class SettingsDialog(QDialog):
         self.monitor_toggle.stateChanged.connect(self.toggle_monitoring)
         layout.addRow("Monitoring:", self.monitor_toggle)
         self.setLayout(layout)
+        self.setStyleSheet("background-color: #f0f0f0;")
 
     def toggle_monitoring(self, state):
         global monitoring_running
@@ -144,45 +148,68 @@ class SettingsDialog(QDialog):
         else:
             parent.stop_monitoring()
 
-# GUI
+# Main GUI
 class NetWatchWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("NetWatch")
-        self.setGeometry(100, 100, 1000, 700)
+        self.setGeometry(100, 100, 1200, 800)
+        
+        # Set modern theme
+        palette = QPalette()
+        palette.setColor(QPalette.Window, QColor(240, 240, 240))
+        palette.setColor(QPalette.WindowText, Qt.black)
+        palette.setColor(QPalette.Button, QColor(200, 200, 200))
+        self.setPalette(palette)
         
         self.status_label = QLabel("Initializing...", self)
-        self.status_label.setStyleSheet("color: blue")
+        self.status_label.setFont(QFont("Arial", 12, QFont.Bold))
+        self.status_label.setStyleSheet("color: #0078d7; padding: 5px;")
         
         self.ensure_privileges()
         self.status_label.setText("Ready to monitor")
-        self.status_label.setStyleSheet("color: green")
         
         self.table = QTableWidget()
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels(["Time", "Device", "IP", "MAC", "Site", "App", "Location"])
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setFont(QFont("Arial", 10))
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
+        self.table.setStyleSheet("QTableWidget { background-color: white; border: 1px solid #d0d0d0; }")
         
         self.start_btn = QPushButton("Start Monitoring")
         self.stop_btn = QPushButton("Stop Monitoring")
         self.refresh_btn = QPushButton("Refresh")
         self.settings_btn = QPushButton("Settings")
+        self.clear_btn = QPushButton("Clear All Data")
         self.filter_combo = QComboBox()
         self.filter_combo.addItem("All Devices")
+        
+        for btn in [self.start_btn, self.stop_btn, self.refresh_btn, self.settings_btn, self.clear_btn]:
+            btn.setFont(QFont("Arial", 10))
+            btn.setStyleSheet("QPushButton { background-color: #0078d7; color: white; padding: 5px; border-radius: 3px; } "
+                            "QPushButton:hover { background-color: #005bb5; }")
+        
         self.stop_btn.setEnabled(False)
         self.start_btn.clicked.connect(self.start_monitoring)
         self.stop_btn.clicked.connect(self.stop_monitoring)
         self.refresh_btn.clicked.connect(self.update_table)
         self.settings_btn.clicked.connect(self.show_settings)
+        self.clear_btn.clicked.connect(self.clear_all_data)
         self.filter_combo.currentTextChanged.connect(self.update_table)
+        self.filter_combo.setStyleSheet("padding: 5px;")
         
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(self.start_btn)
         btn_layout.addWidget(self.stop_btn)
         btn_layout.addWidget(self.refresh_btn)
         btn_layout.addWidget(self.settings_btn)
+        btn_layout.addWidget(self.clear_btn)
+        btn_layout.addStretch()
         btn_layout.addWidget(QLabel("Filter:"))
         btn_layout.addWidget(self.filter_combo)
+        
         layout = QVBoxLayout()
         layout.addWidget(self.status_label)
         layout.addLayout(btn_layout)
@@ -229,9 +256,9 @@ class NetWatchWindow(QMainWindow):
             c = conn.cursor()
             filter_device = self.filter_combo.currentText()
             if filter_device == "All Devices":
-                c.execute("SELECT timestamp, device_name, ip, mac, domain, app, location FROM activity ORDER BY timestamp DESC LIMIT 50")
+                c.execute("SELECT id, timestamp, device_name, ip, mac, domain, app, location FROM activity ORDER BY timestamp DESC LIMIT 50")
             else:
-                c.execute("SELECT timestamp, device_name, ip, mac, domain, app, location FROM activity WHERE device_name = ? ORDER BY timestamp DESC LIMIT 50", (filter_device,))
+                c.execute("SELECT id, timestamp, device_name, ip, mac, domain, app, location FROM activity WHERE device_name = ? ORDER BY timestamp DESC LIMIT 50", (filter_device,))
             rows = c.fetchall()
             
             c.execute("SELECT DISTINCT device_name FROM activity")
@@ -244,10 +271,64 @@ class NetWatchWindow(QMainWindow):
             
             self.table.setRowCount(len(rows))
             for row_idx, row_data in enumerate(rows):
-                for col_idx, data in enumerate(row_data):
+                for col_idx, data in enumerate(row_data[1:]):  # Skip id column
                     self.table.setItem(row_idx, col_idx, QTableWidgetItem(str(data or "")))
+                self.table.setData(Qt.UserRole, row_idx, row_data[0])  # Store id in UserRole
         except Exception as e:
             print(f"Table update error: {e}")
+
+    def show_context_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if row >= 0:
+            menu = QMenu(self)
+            delete_action = menu.addAction("Delete Row")
+            action = menu.exec_(self.table.mapToGlobal(pos))
+            if action == delete_action:
+                self.delete_row(row)
+
+    def delete_row(self, row):
+        password, ok = QInputDialog.getText(self, "Confirm Delete", "Enter root password:", QLineEdit.Password)
+        if ok and self.verify_root_password(password):
+            row_id = self.table.data(Qt.UserRole, row)
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("DELETE FROM activity WHERE id = ?", (row_id,))
+                conn.commit()
+                conn.close()
+                self.update_table()
+                self.status_label.setText("Row deleted")
+                self.status_label.setStyleSheet("color: green")
+            except sqlite3.Error as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete: {e}")
+        elif ok:
+            QMessageBox.warning(self, "Error", "Incorrect password")
+
+    def clear_all_data(self):
+        password, ok = QInputDialog.getText(self, "Confirm Clear", "Enter root password to clear all data:", QLineEdit.Password)
+        if ok and self.verify_root_password(password):
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("DELETE FROM activity")
+                conn.commit()
+                conn.close()
+                self.update_table()
+                self.status_label.setText("All data cleared")
+                self.status_label.setStyleSheet("color: green")
+            except sqlite3.Error as e:
+                QMessageBox.critical(self, "Error", f"Failed to clear: {e}")
+        elif ok:
+            QMessageBox.warning(self, "Error", "Incorrect password")
+
+    def verify_root_password(self, password):
+        try:
+            cmd = f"echo '{password}' | sudo -S true"
+            process = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            return process.returncode == 0
+        except Exception as e:
+            print(f"Password verification failed: {e}")
+            return False
 
     def start_monitoring(self):
         global monitoring_running
