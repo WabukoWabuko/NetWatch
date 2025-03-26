@@ -14,11 +14,12 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTableWidget, QVBoxLayou
                             QMessageBox, QLineEdit, QComboBox, QDialog, QFormLayout, QCheckBox)
 from PyQt5.QtCore import QTimer
 
-# Setup logging
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(message)s")
+# Setup logging with a basic handler to avoid recursion
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
 
 # Global DB path (computed once)
-DB_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "db"))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_DIR = os.path.join(BASE_DIR, "db")
 DB_PATH = os.path.join(DB_DIR, "netwatch.db")
 os.makedirs(DB_DIR, exist_ok=True)
 
@@ -61,20 +62,25 @@ def get_active_interface():
     return None
 
 def log_to_db(device_name, ip, mac, domain=None, app=None, port=None, location=None):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute(
-        "INSERT INTO activity (timestamp, device_name, ip, mac, domain, app, port, location) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (timestamp, device_name, ip, mac, domain, app, port, location)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute(
+            "INSERT INTO activity (timestamp, device_name, ip, mac, domain, app, port, location) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (timestamp, device_name, ip, mac, domain, app, port, location)
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"DB Error: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 def process_packet(packet):
     if not monitoring_running:
         return True
-    from scapy.all import IP, Ether, DNS, TCP, UDP  # Delayed import to avoid recursion
+    from scapy.all import IP, Ether, DNS, TCP, UDP
     logging.debug("Packet received!")
     if packet.haslayer(IP) and packet.haslayer(Ether):
         ip_src = packet[IP].src
@@ -114,7 +120,7 @@ def guess_app_from_port(port, packet):
     return app
 
 def start_monitoring_thread(iface):
-    from scapy.all import sniff  # Delayed import
+    from scapy.all import sniff
     logging.info(f"Starting sniff on {iface}...")
     sniff(iface=iface, prn=process_packet, store=0, stop_filter=lambda x: not monitoring_running)
 
@@ -199,7 +205,8 @@ class NetWatchWindow(QMainWindow):
                 try:
                     display = os.environ.get("DISPLAY", ":0")
                     xauth = os.environ.get("XAUTHORITY", os.path.expanduser("~/.Xauthority"))
-                    cmd = f"echo '{password}' | pkexec --disable-internal-agent env DISPLAY={display} XAUTHORITY={xauth} {sys.executable} {__file__}"
+                    xdg = os.environ.get("XDG_RUNTIME_DIR", "/tmp/runtime-root")
+                    cmd = f"echo '{password}' | pkexec --disable-internal-agent env DISPLAY={display} XAUTHORITY={xauth} XDG_RUNTIME_DIR={xdg} {sys.executable} {__file__}"
                     process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     stdout, stderr = process.communicate()
                     if process.returncode == 0:
@@ -240,7 +247,7 @@ class NetWatchWindow(QMainWindow):
                 for col_idx, data in enumerate(row_data):
                     self.table.setItem(row_idx, col_idx, QTableWidgetItem(str(data or "")))
         except Exception as e:
-            logging.error(f"Table update error: {e}")
+            print(f"Table update error: {e}")
 
     def start_monitoring(self):
         global monitoring_running
@@ -276,31 +283,36 @@ class NetWatchWindow(QMainWindow):
 
 # Initialize DB with updated schema
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS activity (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            device_name TEXT,
-            ip TEXT,
-            mac TEXT,
-            domain TEXT,
-            app TEXT,
-            port INTEGER,
-            location TEXT
-        )
-    """)
     try:
-        c.execute("ALTER TABLE activity ADD COLUMN mac TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        c.execute("ALTER TABLE activity ADD COLUMN location TEXT")
-    except sqlite3.OperationalError:
-        pass
-    conn.commit()
-    conn.close()
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                device_name TEXT,
+                ip TEXT,
+                mac TEXT,
+                domain TEXT,
+                app TEXT,
+                port INTEGER,
+                location TEXT
+            )
+        """)
+        try:
+            c.execute("ALTER TABLE activity ADD COLUMN mac TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute("ALTER TABLE activity ADD COLUMN location TEXT")
+        except sqlite3.OperationalError:
+            pass
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"DB Init Error: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 if __name__ == "__main__":
     init_db()
