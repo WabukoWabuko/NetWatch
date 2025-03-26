@@ -36,21 +36,24 @@ This project showcases expertise in **Python programming, GUI development, netwo
 
 ### Steps  
 
-```bash
 # Clone the repository
+```
 git clone https://github.com/WabukoWabuko/netwatch.git
-cd netwatch```
+cd netwatch
+```
 
 # (Optional) Create & activate a virtual environment
-```python -m venv netwatch_env
+```
+python -m venv netwatch_env
 source netwatch_env/bin/activate  # Linux/Mac
-netwatch_env\Scripts\activate     # Windows```
+netwatch_env\Scripts\activate     # Windows
+```
 
 # Install dependencies
-```pip install -r requirements.txt```
+`pip install -r requirements.txt`
 
 # Run the application
-```python app/main.py```
+`python app/main.py`
 
 # 🎯 Usage  
 
@@ -108,8 +111,8 @@ Contributions are welcome!
 
 1. **Fork the repo**  
 2. Create a new branch:  
-   ```bash
-   git checkout -b feature/your-feature```
+   bash
+    `git checkout -b feature/your-feature`
 # 📜 License  
 
 This project is licensed under the **MIT License**.  
