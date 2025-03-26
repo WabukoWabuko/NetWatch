@@ -1,16 +1,37 @@
 # service/monitor.py
-from scapy.all import sniff, DNS
+import socket
+import struct
 
-def capture_traffic():
-    print("Starting network monitoring...")
-    def process_packet(packet):
-        if packet.haslayer(DNS) and packet[DNS].qr == 0:  # DNS query (not response)
-            domain = packet[DNS].qd.qname.decode('utf-8').rstrip('.')
-            ip_src = packet['IP'].src
-            print(f"Device {ip_src} queried {domain}")
+def capture_dns(start_port=5353, max_attempts=8):
+    print("Starting DNS monitoring...")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     
-    # Sniff DNS traffic (port 53), limit to 10 packets for testing
-    sniff(filter="udp port 53", prn=process_packet, count=10)
+    # Try binding to a port in the range
+    for port in range(start_port, start_port + max_attempts):
+        try:
+            sock.bind(("0.0.0.0", port))
+            print(f"Listening on port {port}")
+            break
+        except OSError as e:
+            if e.errno == 98:  # Address already in use
+                print(f"Port {port} in use, trying next...")
+                continue
+            raise  # Re-raise other errors
+    else:
+        raise OSError("No available ports found in range!")
+
+    while True:
+        try:
+            data, addr = sock.recvfrom(512)  # DNS packets are small
+            if len(data) > 12:  # Skip header
+                query = data[12:].decode('utf-8', errors='ignore').split('\x00')[0]
+                print(f"Device {addr[0]} queried {query}")
+        except KeyboardInterrupt:
+            print("Stopping DNS monitoring...")
+            sock.close()
+            break
+        except Exception as e:
+            print(f"Error: {e}")
 
 if __name__ == "__main__":
-    capture_traffic()
+    capture_dns()
