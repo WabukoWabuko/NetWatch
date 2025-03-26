@@ -2,6 +2,7 @@
 import os
 import sys
 import socket
+import netifaces
 from scapy.all import sniff, DNS, IP, TCP, UDP, conf
 
 def get_device_name(ip):
@@ -19,15 +20,36 @@ def elevate_privileges():
         os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
         sys.exit(0)
 
-def capture_traffic(iface=None):
+def get_active_interface():
+    """Find the active non-loopback interface."""
+    for iface in netifaces.interfaces():
+        if iface != 'lo':  # Skip loopback
+            addrs = netifaces.ifaddresses(iface)
+            if netifaces.AF_INET in addrs:  # Has an IPv4 address
+                print(f"Found active interface: {iface}")
+                return iface
+    print("No active interface found!")
+    sys.exit(1)
+
+def capture_traffic():
     print("Starting network monitoring...")
     
-    # Default to first active interface if none specified
-    if not iface:
-        iface = conf.iface  # Scapy’s default interface
+    # Auto-detect interface
+    iface = get_active_interface()
     print(f"Sniffing on interface: {iface}")
     
+    # Check interface status
+    try:
+        with open(f"/sys/class/net/{iface}/operstate") as f:
+            status = f.read().strip()
+        print(f"Interface {iface} status: {status}")
+        if status != "up":
+            print("Warning: Interface is not up!")
+    except FileNotFoundError:
+        print(f"Error: Interface {iface} inaccessible")
+
     def process_packet(packet):
+        print("Packet received!")  # Debug
         if packet.haslayer(IP):
             ip_src = packet[IP].src
             device_name = get_device_name(ip_src)
@@ -54,9 +76,10 @@ def guess_app_from_port(port):
 
 if __name__ == "__main__":
     elevate_privileges()
-    # Try your Wi-Fi interface (e.g., "wlan0" on Parrot OS); adjust as needed
     try:
-        capture_traffic(iface="wlan0")
+        print("Initializing Scapy...")
+        # Sniff all traffic, no filter for now
+        capture_traffic()
     except Exception as e:
-        print(f"Failed to start sniffing: {e}")
+        print(f"Error: {e}")
         sys.exit(1)
