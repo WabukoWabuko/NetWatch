@@ -1,48 +1,55 @@
 # service/monitor.py
+import os
+import sys
 import socket
+from scapy.all import sniff, DNS, IP, TCP, UDP
 
-def capture_dns(start_port=5353, max_attempts=8, upstream_dns="8.8.8.8"):
-    print("Starting DNS monitoring...")
+def get_device_name(ip):
+    """Resolve device name from IP."""
+    try:
+        name, _, _ = socket.gethostbyaddr(ip)
+        return name
+    except socket.herror:
+        return "Unknown"
+
+def elevate_privileges():
+    """Re-run script with sudo if not already elevated."""
+    if os.geteuid() != 0:  # Not root
+        print("Elevating privileges...")
+        os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
+        sys.exit(0)  # Shouldn’t reach here
+
+def capture_traffic(iface=None):
+    print("Starting network monitoring...")
     
-    # Create UDP socket for listening
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    # Find an available port
-    for port in range(start_port, start_port + max_attempts):
-        try:
-            sock.bind(("0.0.0.0", port))
-            print(f"Listening on port {port}")
-            break
-        except OSError as e:
-            if e.errno == 98:
-                print(f"Port {port} in use, trying next...")
-                continue
-            raise
-    else:
-        raise OSError("No available ports found!")
-
-    # Upstream DNS server socket
-    upstream = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    while True:
-        try:
-            data, addr = sock.recvfrom(512)  # Receive DNS query from client
-            if len(data) > 12:  # Basic DNS header check
-                query = data[12:].decode('utf-8', errors='ignore').split('\x00')[0]
-                print(f"Device {addr[0]} queried {query}")
+    def process_packet(packet):
+        if packet.haslayer(IP):
+            ip_src = packet[IP].src
+            device_name = get_device_name(ip_src)
             
-            # Forward query to upstream DNS (e.g., Google)
-            upstream.sendto(data, (upstream_dns, 53))
-            response, _ = upstream.recvfrom(512)  # Get response
-            sock.sendto(response, addr)  # Send response back to client
+            # DNS query (site visited)
+            if packet.haslayer(DNS) and packet[DNS].qr == 0:
+                domain = packet[DNS].qd.qname.decode('utf-8').rstrip('.')
+                print(f"Device {device_name} ({ip_src}) visited site: {domain}")
+            
+            # TCP/UDP traffic (app detection)
+            elif packet.haslayer(TCP) or packet.haslayer(UDP):
+                port = packet[TCP].dport if packet.haslayer(TCP) else packet[UDP].dport
+                app_guess = guess_app_from_port(port)
+                print(f"Device {device_name} ({ip_src}) used app: {app_guess} (port {port})")
 
-        except KeyboardInterrupt:
-            print("Stopping DNS monitoring...")
-            sock.close()
-            upstream.close()
-            break
-        except Exception as e:
-            print(f"Error: {e}")
+def guess_app_from_port(port):
+    """Guess app based on common ports (simplified)."""
+    port_map = {
+        80: "Web Browser (HTTP)",
+        443: "Web Browser (HTTPS)",
+        53: "DNS Client",
+        5228: "Google Services (e.g., Play Store)",
+        1935: "Streaming App (e.g., Flash)",
+    }
+    return port_map.get(port, "Unknown App")
 
 if __name__ == "__main__":
-    capture_dns()
+    elevate_privileges()  # Auto-elevate if needed
+    # Use default interface; specify if needed (e.g., "wlan0")
+    capture_traffic()
