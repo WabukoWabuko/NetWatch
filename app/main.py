@@ -6,8 +6,9 @@ import sqlite3
 import netifaces
 import threading
 import logging
+import subprocess
 from datetime import datetime
-from PyQt5.QtWidgets import QApplication, QMainWindow, QTableWidget, QVBoxLayout, QWidget, QTableWidgetItem, QPushButton, QHBoxLayout, QLabel
+from PyQt5.QtWidgets import QApplication, QMainWindow, QTableWidget, QVBoxLayout, QWidget, QTableWidgetItem, QPushButton, QHBoxLayout, QLabel, QInputDialog, QMessageBox
 from PyQt5.QtCore import QTimer
 from scapy.all import sniff, DNS, IP, TCP, UDP, Ether
 from flask import Flask, jsonify, request
@@ -15,7 +16,7 @@ from flask import Flask, jsonify, request
 # Setup logging
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(message)s")
 
-# Flask app for internal config (runs in thread)
+# Flask app for internal config
 flask_app = Flask(__name__)
 monitoring_running = False
 
@@ -63,7 +64,7 @@ def log_to_db(device_name, ip, mac, domain=None, app=None, port=None):
 
 def process_packet(packet):
     if not monitoring_running:
-        return True  # Stop sniffing
+        return True
     logging.debug("Packet received!")
     if packet.haslayer(IP) and packet.haslayer(Ether):
         ip_src = packet[IP].src
@@ -102,13 +103,12 @@ class NetWatchWindow(QMainWindow):
         self.setWindowTitle("NetWatch")
         self.setGeometry(100, 100, 800, 600)
         
-        # Check privileges
-        if os.geteuid() != 0:
-            self.status_label = QLabel("Run with sudo for monitoring to work!", self)
-            self.status_label.setStyleSheet("color: red")
-        else:
-            self.status_label = QLabel("Ready to monitor", self)
-            self.status_label.setStyleSheet("color: green")
+        # Check and request privileges
+        self.ensure_privileges()
+        
+        # Status label
+        self.status_label = QLabel("Ready to monitor", self)
+        self.status_label.setStyleSheet("color: green")
         
         # Setup table
         self.table = QTableWidget()
@@ -146,22 +146,46 @@ class NetWatchWindow(QMainWindow):
         self.update_table()
         self.monitor_thread = None
 
+    def ensure_privileges(self):
+        if os.geteuid() != 0:
+            password, ok = QInputDialog.getText(self, "Admin Access Required", "Enter root password:", echo=QInputDialog.Password)
+            if ok and password:
+                try:
+                    # Use pkexec to elevate (adjust path if needed)
+                    cmd = f"echo '{password}' | pkexec --disable-internal-agent {sys.executable} {__file__}"
+                    process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    stdout, stderr = process.communicate()
+                    if process.returncode == 0:
+                        sys.exit(0)  # Relaunch successful, exit current instance
+                    else:
+                        QMessageBox.critical(self, "Error", f"Failed to elevate privileges: {stderr.decode()}")
+                        self.status_label.setText("Error: Must run with root privileges!")
+                        self.status_label.setStyleSheet("color: red")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Elevation failed: {e}")
+            else:
+                self.status_label.setText("Error: Root password required!")
+                self.status_label.setStyleSheet("color: red")
+
     def update_table(self):
-        conn = sqlite3.connect("db/netwatch.db")
-        c = conn.cursor()
-        c.execute("SELECT timestamp, device_name, ip, mac, domain, app FROM activity ORDER BY timestamp DESC LIMIT 50")
-        rows = c.fetchall()
-        conn.close()
-        
-        self.table.setRowCount(len(rows))
-        for row_idx, row_data in enumerate(rows):
-            for col_idx, data in enumerate(row_data):
-                self.table.setItem(row_idx, col_idx, QTableWidgetItem(str(data or "")))
+        try:
+            conn = sqlite3.connect("db/netwatch.db")
+            c = conn.cursor()
+            c.execute("SELECT timestamp, device_name, ip, mac, domain, app FROM activity ORDER BY timestamp DESC LIMIT 50")
+            rows = c.fetchall()
+            conn.close()
+            
+            self.table.setRowCount(len(rows))
+            for row_idx, row_data in enumerate(rows):
+                for col_idx, data in enumerate(row_data):
+                    self.table.setItem(row_idx, col_idx, QTableWidgetItem(str(data or "")))
+        except sqlite3.OperationalError as e:
+            logging.error(f"Database error: {e}")
 
     def start_monitoring(self):
         global monitoring_running
         if os.geteuid() != 0:
-            self.status_label.setText("Error: Must run with sudo!")
+            self.status_label.setText("Error: Must run with root privileges!")
             return
         iface = get_active_interface()
         if not iface:
@@ -174,36 +198,44 @@ class NetWatchWindow(QMainWindow):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.status_label.setText("Monitoring started")
+        self.status_label.setStyleSheet("color: green")
 
     def stop_monitoring(self):
         global monitoring_running
         monitoring_running = False
         if self.monitor_thread:
-            self.monitor_thread.join(timeout=2)  # Wait for thread to stop
+            self.monitor_thread.join(timeout=2)
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.status_label.setText("Monitoring stopped")
+        self.status_label.setStyleSheet("color: green")
+
+# Initialize DB with updated schema
+def init_db():
+    conn = sqlite3.connect("db/netwatch.db")
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS activity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            device_name TEXT,
+            ip TEXT,
+            mac TEXT,
+            domain TEXT,
+            app TEXT,
+            port INTEGER
+        )
+    """)
+    # Add mac column if missing
+    try:
+        c.execute("ALTER TABLE activity ADD COLUMN mac TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    conn.commit()
+    conn.close()
 
 if __name__ == "__main__":
-    # Ensure DB exists
-    if not os.path.exists("db/netwatch.db"):
-        conn = sqlite3.connect("db/netwatch.db")
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS activity (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                device_name TEXT,
-                ip TEXT,
-                mac TEXT,
-                domain TEXT,
-                app TEXT,
-                port INTEGER
-            )
-        """)
-        conn.commit()
-        conn.close()
-    
+    init_db()  # Ensure DB is ready
     app = QApplication(sys.argv)
     window = NetWatchWindow()
     window.show()
