@@ -26,8 +26,9 @@ DB_DIR = os.path.join(BASE_DIR, "db")
 DB_PATH = os.path.join(DB_DIR, "netwatch.db")
 os.makedirs(DB_DIR, exist_ok=True)
 
-# Monitoring state
+# Monitoring state and lock
 monitoring_running = False
+update_lock = threading.Lock()
 
 # Monitoring functions
 def get_device_name(ip):
@@ -74,6 +75,7 @@ def log_to_db(device_name, ip, mac, domain=None, app=None, port=None, location=N
             (timestamp, device_name, ip, mac, domain, app, port, location)
         )
         conn.commit()
+        logging.debug(f"Logged: {ip} - {domain or app}")
     except sqlite3.Error as e:
         logging.error(f"DB Error: {e}")
     finally:
@@ -84,26 +86,26 @@ def process_packet(packet):
     if not monitoring_running:
         return True
     from scapy.all import IP, Ether, DNS, TCP, UDP
-    logging.debug(f"Processing packet: {packet.summary()}")
+    logging.debug(f"Packet: {packet.summary()}")
     if packet.haslayer(IP) and packet.haslayer(Ether):
         ip_src = packet[IP].src
         mac_src = packet[Ether].src
         device_name = get_device_name(ip_src)
         location = get_location(ip_src)
         
-        if packet.haslayer(DNS) and packet[DNS].qr == 0:
+        if packet.haslayer(DNS) and packet[DNS].qr == 0:  # DNS request
             domain = packet[DNS].qd.qname.decode('utf-8').rstrip('.')
-            logging.info(f"Device {device_name} ({ip_src}, {mac_src}) visited site: {domain} at {location}")
+            logging.info(f"Device {device_name} ({ip_src}, {mac_src}) requested: {domain} at {location}")
             log_to_db(device_name, ip_src, mac_src, domain=domain, location=location)
         
-        elif packet.haslayer(TCP) or packet.haslayer(UDP):
+        elif packet.haslayer(TCP) or packet.haslayer(UDP):  # TCP/UDP traffic
             port = packet[TCP].dport if packet.haslayer(TCP) else packet[UDP].dport
             app = guess_app_from_port(port, packet)
             domain = get_domain_from_ip(packet[IP].dst) if packet[IP].dst else None
             logging.info(f"Device {device_name} ({ip_src}, {mac_src}) used app: {app} (port {port}) to {domain or 'unknown'} at {location}")
             log_to_db(device_name, ip_src, mac_src, domain=domain, app=app, port=port, location=location)
     else:
-        logging.debug("Packet ignored: no IP or Ether layer")
+        logging.debug("Ignored: no IP/Ether layer")
 
 def guess_app_from_port(port, packet):
     port_map = {
@@ -118,9 +120,10 @@ def guess_app_from_port(port, packet):
     }
     app = port_map.get(port, "Unknown App")
     if packet.haslayer(TCP) and port in [80, 443]:
-        if b"GET" in bytes(packet[TCP].payload) or b"POST" in bytes(packet[TCP].payload):
+        payload = bytes(packet[TCP].payload)
+        if b"GET" in payload or b"POST" in payload:
             app = "Web Browser"
-        elif b"youtube" in bytes(packet[TCP].payload).lower():
+        elif b"youtube" in payload.lower():
             app = "YouTube"
     return app
 
@@ -128,6 +131,7 @@ def start_monitoring_thread(iface):
     from scapy.all import sniff
     logging.info(f"Starting sniff on {iface}...")
     try:
+        # No filter to capture all traffic, adjust if needed
         sniff(iface=iface, prn=process_packet, store=0, stop_filter=lambda x: not monitoring_running)
     except Exception as e:
         logging.error(f"Sniffing failed: {e}")
@@ -224,7 +228,7 @@ class NetWatchWindow(QMainWindow):
         
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_table)
-        self.timer.start(2000)
+        self.timer.start(500)  # Faster updates for real-time feel
         
         self.update_table()
         self.monitor_thread = None
@@ -255,6 +259,8 @@ class NetWatchWindow(QMainWindow):
                 self.status_label.setStyleSheet("color: red")
 
     def update_table(self):
+        if not update_lock.acquire(blocking=False):
+            return
         try:
             conn = sqlite3.connect(DB_PATH)
             c = conn.cursor()
@@ -278,8 +284,11 @@ class NetWatchWindow(QMainWindow):
                 for col_idx, data in enumerate(row_data[1:]):
                     self.table.setItem(row_idx, col_idx, QTableWidgetItem(str(data or "")))
                 self.table.setData(Qt.UserRole, row_idx, row_data[0])
+            logging.debug(f"Table updated with {len(rows)} rows")
         except Exception as e:
-            logging.error(f"Table update error: {e}")
+            print(f"Table update error: {e}")
+        finally:
+            update_lock.release()
 
     def show_context_menu(self, pos):
         row = self.table.rowAt(pos.y())

@@ -2,3 +2,5 @@ scapy
 SIP
 Flask
 pyqt5
+netifaces
+requests
