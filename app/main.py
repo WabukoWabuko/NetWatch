@@ -8,8 +8,9 @@ import threading
 import logging
 import subprocess
 from datetime import datetime
-from PyQt5.QtWidgets import QApplication, QMainWindow, QTableWidget, QVBoxLayout, QWidget, QTableWidgetItem, QPushButton, QHBoxLayout, QLabel, QInputDialog, QMessageBox
-from PyQt5.QtGui import QLineEdit  # Import QLineEdit for EchoMode
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QTableWidget, QVBoxLayout, QWidget, 
+                            QTableWidgetItem, QPushButton, QHBoxLayout, QLabel, QInputDialog, 
+                            QMessageBox, QLineEdit)
 from PyQt5.QtCore import QTimer
 from scapy.all import sniff, DNS, IP, TCP, UDP, Ether
 from flask import Flask, jsonify, request
@@ -53,7 +54,8 @@ def get_active_interface():
     return None
 
 def log_to_db(device_name, ip, mac, domain=None, app=None, port=None):
-    conn = sqlite3.connect("db/netwatch.db")
+    db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "db", "netwatch.db"))
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute(
@@ -104,11 +106,15 @@ class NetWatchWindow(QMainWindow):
         self.setWindowTitle("NetWatch")
         self.setGeometry(100, 100, 800, 600)
         
+        # Initialize status label early
+        self.status_label = QLabel("Initializing...", self)
+        self.status_label.setStyleSheet("color: blue")
+        
         # Check and request privileges
         self.ensure_privileges()
         
-        # Status label
-        self.status_label = QLabel("Ready to monitor", self)
+        # Update status label if we get past elevation
+        self.status_label.setText("Ready to monitor")
         self.status_label.setStyleSheet("color: green")
         
         # Setup table
@@ -152,7 +158,10 @@ class NetWatchWindow(QMainWindow):
             password, ok = QInputDialog.getText(self, "Admin Access Required", "Enter root password:", QLineEdit.Password)
             if ok and password:
                 try:
-                    cmd = f"echo '{password}' | pkexec --disable-internal-agent {sys.executable} {__file__}"
+                    # Preserve display environment
+                    display = os.environ.get("DISPLAY", ":0")
+                    xauth = os.environ.get("XAUTHORITY", os.path.expanduser("~/.Xauthority"))
+                    cmd = f"echo '{password}' | pkexec --disable-internal-agent env DISPLAY={display} XAUTHORITY={xauth} {sys.executable} {__file__}"
                     process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     stdout, stderr = process.communicate()
                     if process.returncode == 0:
@@ -163,13 +172,16 @@ class NetWatchWindow(QMainWindow):
                         self.status_label.setStyleSheet("color: red")
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"Elevation failed: {e}")
+                    self.status_label.setText("Error: Elevation failed!")
+                    self.status_label.setStyleSheet("color: red")
             else:
                 self.status_label.setText("Error: Root password required!")
                 self.status_label.setStyleSheet("color: red")
 
     def update_table(self):
         try:
-            conn = sqlite3.connect("db/netwatch.db")
+            db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "db", "netwatch.db"))
+            conn = sqlite3.connect(db_path)
             c = conn.cursor()
             c.execute("SELECT timestamp, device_name, ip, mac, domain, app FROM activity ORDER BY timestamp DESC LIMIT 50")
             rows = c.fetchall()
@@ -212,7 +224,10 @@ class NetWatchWindow(QMainWindow):
 
 # Initialize DB with updated schema
 def init_db():
-    conn = sqlite3.connect("db/netwatch.db")
+    db_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "db"))
+    os.makedirs(db_dir, exist_ok=True)
+    db_path = os.path.join(db_dir, "netwatch.db")
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS activity (
